@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "goliathrealty",
+  "name": "GoliathRealty",
+  "tagline": "Real estate brokerage operations on GoliathApp: transactions, broker compliance, escrow, commissions, AI-assisted leads, and a client portal.",
+  "description": "GoliathRealty specializes GoliathApp for small independent Florida brokerages (roughly 3–40 agents). It records listings and listing intake, contacts and leads, showings, offers and transactions with FAR-BAR deadline checklists, documents and e-signatures, broker compliance review, the escrow/trust ledger with monthly reconciliation, commission plans, splits and caps, and agent licensing, with a client portal for buyers, sellers, landlords and tenants. Leads arrive only through sanctioned channels (portal lead emails and partner APIs, Meta and Google lead forms, the brokerage's own IDX site) and public data, with AI deduplication, scoring and agent-reviewed drafts; scraping Zillow, Redfin or Realtor.com is out of scope. Workflows run on the GoliathApp Workflow Engine; accounting syncs through a pluggable adapter (QuickBooks Online, ERPNext). This repository holds the catalog entry and plan; implementation is planned.",
+  "category": "application",
+  "features": [
+    {
+      "title": "Transactions and broker compliance",
+      "description": "Offer-to-close workflows with FAR-BAR deadlines, checklists, e-signatures and broker approval before closing; buyer-agreement gate before tours."
+    },
+    {
+      "title": "Escrow ledger and commissions",
+      "description": "Florida escrow timing and monthly reconciliation, commission plans with splits, caps and fees, agent statements and accounting sync."
+    },
+    {
+      "title": "AI-assisted lead collection",
+      "description": "Sanctioned portal lead ingestion and public-data prospecting with deduplication, explainable scoring, Do Not Call controls and agent-reviewed first messages."
+    },
+    {
+      "title": "Client portal",
+      "description": "Saved searches, transaction timeline, documents and signing, and messages for buyers, sellers, landlords and tenants."
+    }
+  ],
+  "links": {
+    "repository": "https://github.com/Goliath-Research/GoliathRealty",
+    "docs": null,
+    "website": null
+  },
+  "related": ["goliathapp", "goliathfactory"],
+  "dependsOn": ["goliathapp"],
+  "license": "MIT",
+  "status": "planned"
+}
