@@ -22,7 +22,7 @@ The pitch: Florida rules built in (brokerage relationship disclosures, 3-busines
 | --- | --- |
 | Parent | GoliathApp (knows nothing about GoliathRealty) |
 | Auth | Inherit GoliathApp auth and `RBAC.Sessions`; clients are external users with a scoped role |
-| API | Neon PostgreSQL stored procedures; portal connects over private network |
+| API | GoliathApp semantic registry (`portal.sp_run_semantic_request`, Exograph GraphQL/MCP) for reads; `ActionSpec` actions via the gateway for writes |
 | Workflows | GoliathApp Workflow Engine (IF/SWITCH/WHILE, WAIT_EVENT); human approval steps, e-signature, audit trail and pending-tasks API are planned GoliathApp features, not built here |
 | Shared modules | Accounting adapter from the GoliathFactory plan (QuickBooks Online first, ERPNext free); inventory/purchasing module not used |
 | Workers | Claim through goliath-gateway only; Postgres pub/sub wakes event tasks |
@@ -122,28 +122,152 @@ Controls:
 - **Messages:** threaded with the agent and TC, stored with the transaction.
 - **Landlord / tenant (later):** rent ledger, maintenance requests, lease documents.
 
-## Domain model
+## Semantic layer
 
-| Entity | Key facts |
-| --- | --- |
-| Brokerage / office / team | License numbers, escrow accounts, team membership and leader |
-| Agent | License type and number, expiry, CE hours, commission plan, MLS IDs |
-| Contact / client | Person or entity, roles per deal, consent and communication preferences |
-| Brokerage relationship | Transaction broker / single agent / no brokerage; disclosure doc and date; transitions with consent |
-| Buyer agreement | Signed date, term, compensation amount or rate, negotiable statement; required before tours |
-| Property | Parcel ID, address, geometry (PostGIS), facts, public-record links |
-| Listing | Listing agreement, price history, MLS number, status, showing instructions |
-| Lead | Source, routing history, assignee, stage |
-| Lead source / raw lead | Channel, payload, received time, parser version, consent evidence |
-| Prospect | Public-data origin (appraiser, clerk, MLS expired), property link, suppression flags |
-| Consent / suppression | Per phone/email: consent text, time, source; DNC check date; opt-outs (GoliathApp registry) |
-| Lead score / draft | Score, explanation, model version; draft and agent edit/send record |
-| Showing | Property, agent, client, time, feedback |
-| Offer / transaction | Parties, price, contract form, effective date, deadlines, checklist, stage |
-| Document / signature | Template, version, signer, meaning, time (GoliathApp service) |
-| Escrow ledger entry | Account, transaction, amount, received/deposited dates, disbursement authorization |
-| Commission plan / disbursement | Split rules, caps, fees; per-closing calculation and payout lines |
-| Audit trail | Append-only (GoliathApp) |
+Raw tables are an internal detail. Users, the portal, and agents see **GoliathRealty** through GoliathApp's semantic registry ([semantic layer](https://goliath-research.github.io/GoliathApp/semantic-layer/), [semantic extensions](https://goliath-research.github.io/GoliathApp/semantic-extensions/)), the same pattern as GoliathOmics.
+
+- **Namespace:** `re` (row in `portal.semantic_namespace`; GoliathApp owns `core` and `engine`).
+- **Registration:** Python `SemanticEntitySpec` / `SemanticRequestSpec` (`goliath_app.semantic.spec`) → `goliath-semantic-export` (Pydantic row models, `portal_semantic_row_types.sql`, `schemas/semantic/catalog.json`) → release seeder calling `portal.sp_semantic_register_entity`, `portal.sp_semantic_register_attribute`, `portal.sp_semantic_register_request`.
+- **Reads:** every read is a named request run by `portal.sp_run_semantic_request` (RBAC permission + organization scope), via `goliath_app.portal.PortalClient` or the Exograph GraphQL/MCP façade.
+
+### Entities
+
+| Code | Display name | Key attributes | Backing (`storage_relation` / Meta class) |
+| --- | --- | --- | --- |
+| `re.office` | Office / team | brokerage org, office, team, leader | view `re_org.v_office` |
+| `re.agent` | Agent | license, expiry, CE hours, commission plan, MLS IDs | view `re_org.v_agent` |
+| `re.contact` | Contact | person or entity, roles, consent, preferences | view `re_crm.v_contact` |
+| `re.lead` | Lead | source, stage, assignee, score, consent status | view `re_lead.v_lead` (joins raw_leads, prospects, scores) |
+| `re.prospect` | Prospect | public-data origin, property, suppression flags | view `re_lead.v_prospect` |
+| `re.property` | Property | parcel, address, geometry (GeoJSON), facts | view `re_prop.v_property` |
+| `re.listing` | Listing | property, MLS number, price, status, history | view `re_prop.v_listing` |
+| `re.showing` | Showing | listing, agent, client, time, feedback | view `re_deal.v_showing` |
+| `re.buyer_agreement` | Buyer agreement | client, signed date, term, compensation | view `re_deal.v_buyer_agreement` |
+| `re.transaction` | Transaction | parties, price, form, deadlines, checklist, stage | view `re_deal.v_transaction` |
+| `re.document` | Document | template, version, signers, review | view `re_doc.v_document` |
+| `re.escrow_entry` | Escrow entry | account, transaction, amount, dates, authorization | view `re_trust.v_ledger_entry` |
+| `re.commission` | Commission | transaction, plan, splits, payout lines | view `re_comm.v_disbursement` |
+
+### Named requests
+
+| `request_code` | Entity | Params | `required_permission` | Target |
+| --- | --- | --- | --- | --- |
+| `re.lead.list_by_agent` | `re.lead` | agent_id?, stage?, min_score? | `re.lead.read` | view |
+| `re.lead.detail` | `re.lead` | lead_id | `re.lead.read` | function `re_lead.fn_lead_detail` |
+| `re.listing.search` | `re.listing` | polygon?, price_min?, price_max?, beds?, status? | `re.listing.read` | function `re_prop.fn_listing_search` |
+| `re.transaction.pipeline` | `re.transaction` | office_id?, stage? | `re.transaction.read` | view |
+| `re.transaction.deadlines_due` | `re.transaction` | within_days | `re.transaction.read` | view |
+| `re.escrow_entry.reconciliation` | `re.escrow_entry` | account_id, month | `re.trust.read` | function `re_trust.fn_reconciliation` |
+| `re.commission.statement` | `re.commission` | agent_id, period | `re.commission.read` | view |
+
+### Example entity spec
+
+```python
+from goliath_app.semantic.spec import SemanticAttributeSpec, SemanticEntitySpec, SemanticRequestSpec
+
+LEAD_ENTITY = SemanticEntitySpec(
+    namespace="re",
+    code="lead",
+    display_name="Lead",
+    description="A person-level lead merged across channels, with stage, score, and consent.",
+    schema_version="1",
+    row_model=LeadRow,
+    storage_relation="re_lead.v_lead",
+    attributes=(
+        SemanticAttributeSpec(code="lead_id", column_name="id", json_type="integer", role="key"),
+        SemanticAttributeSpec(code="agent_id", column_name="agent_id", json_type="integer", role="filter", filterable_ops=("eq",)),
+        SemanticAttributeSpec(code="display_name", column_name="display_name", json_type="string", role="label", filterable_ops=("ilike",)),
+        SemanticAttributeSpec(code="stage", column_name="stage", json_type="string", role="attribute", filterable_ops=("eq", "in")),
+        SemanticAttributeSpec(code="score", column_name="score", json_type="number", role="measure", filterable_ops=("gte",)),
+    ),
+)
+
+LEAD_LIST = SemanticRequestSpec(
+    request_code="re.lead.list_by_agent",
+    version="1",
+    namespace="re",
+    entity_code="lead",
+    target_kind="view",
+    target_name="re_lead.v_lead",
+    params_model=LeadListParams,
+    result_row_model=LeadRow,
+    required_permission="re.lead.read",
+    max_rows=500,
+)
+```
+
+## Action layer
+
+Business operations are typed `ActionSpec` rows (`goliath_app.actions.spec`), published through the `goliath.action_catalogs` entry point and synced into `wf.workflow_action` by the release (`seed_action_catalog.py --use-db`). Levels: `engine` = low-level workflow steps (GoliathApp), `core` = GoliathApp core-entity actions, `domain` = GoliathRealty business actions. Every user-facing action uses `exposure=ActionExposure.RBAC` and names its `entity_code`; internal helper steps use `ActionExposure.HIDDEN`.
+
+| `action_name` | Level | `entity_code` | Exposure | `required_permission` | Capability |
+| --- | --- | --- | --- | --- | --- |
+| `re.lead.intake` | domain | `re.lead` | HIDDEN | — | `re.intake` |
+| `re.lead.resolve_entity` | domain | `re.lead` | HIDDEN | — | `re.resolve` |
+| `re.lead.score` | domain | `re.lead` | RBAC | `re.lead.write` | `re.ai` |
+| `re.lead.draft_message` | domain | `re.lead` | RBAC | `re.lead.write` | `re.ai` |
+| `re.lead.route` | domain | `re.lead` | RBAC | `re.lead.assign` | `re.crm` |
+| `re.prospect.dnc_check` | domain | `re.prospect` | HIDDEN | — | `re.compliance` |
+| `re.transaction.open` | domain | `re.transaction` | RBAC | `re.transaction.write` | `re.deal` |
+| `re.escrow_entry.record_deposit` | domain | `re.escrow_entry` | RBAC | `re.trust.write` | `re.trust` |
+| `re.commission.calculate` | domain | `re.commission` | RBAC | `re.commission.write` | `re.comm` |
+
+### Example ActionSpec
+
+```python
+from goliath_app.actions.spec import ActionExposure, ActionLevel, ActionSpec
+
+SCORE = ActionSpec(
+    action_name="re.lead.score",
+    namespace="re",
+    level=ActionLevel.DOMAIN,
+    entity_code="lead",
+    display_name="Score lead",
+    description="Score a lead with the AI model and store explanation and model version.",
+    exposure=ActionExposure.RBAC,
+    required_permission="re.lead.write",
+    input_model=LeadScoreInput,
+    output_model=LeadScoreOutput,
+    schema_version="1",
+    capability="re.ai",
+    tool="re-lead-scorer",
+)
+```
+
+```toml
+# pyproject.toml
+[project.entry-points."goliath.action_catalogs"]
+re = "goliath_realty.actions.catalog:ACTIONS"
+```
+
+## NavTree extension
+
+GoliathRealty **adds** nodes to `portal."NavTree"` with `portal.sp_nav_register_node(p_parent_id, p_caption, p_seq, p_info_id, p_node_path, p_sort_path)` and grants them in `portal."Role2Node"` (`ScopeId`, `RoleId`, `NodeId`). It never updates or deletes GoliathApp foundation nodes (home, organizations, users and roles, workflows, admin); it only attaches a top-level **Realty** node beside them and children under it. Captions stay within `varchar(50)`. Each leaf's `InfoID` points to the entity, request, or action it opens.
+
+| Node path | Opens | Roles (`Role2Node`) |
+| --- | --- | --- |
+| Realty | group node beside foundation menus | all realty roles |
+| Realty › Leads | `re.lead.list_by_agent`, `re.lead.detail`; actions `re.lead.route`, `re.lead.draft_message` | agent, team lead, broker |
+| Realty › Contacts | contact list (`re.contact`) | agent, team lead |
+| Realty › Listings & properties | `re.listing.search` | agent, broker, client (portal) |
+| Realty › Transactions | `re.transaction.pipeline`, `re.transaction.deadlines_due`; action `re.transaction.open` | agent, transaction coordinator, broker |
+| Realty › Trust accounting | `re.escrow_entry.reconciliation`; action `re.escrow_entry.record_deposit` | broker, bookkeeper |
+| Realty › Commissions | `re.commission.statement`; action `re.commission.calculate` | broker, bookkeeper, agent (own) |
+| Realty › Client portal | saved searches, messages, documents for the signed-in client | client |
+
+Role2Node rows are scoped per organization (`ScopeId`); the release seeder inserts them idempotently after the nodes exist. Foundation menus remain exactly as GoliathApp ships them.
+
+## Reuse of GoliathApp
+
+| Concern | Comes from GoliathApp | GoliathRealty adds |
+| --- | --- | --- |
+| Organizations and tenancy | `portal."Organizations"`, `portal.fn_semantic_user_organization_ids` | Brokerage = organization; offices and teams are entities under it (no separate `re_org` tenancy) |
+| RBAC | `RBAC` roles, `"RBAC"."UserRoleGrants"`, `"RBAC"."Role_Permissions"`, sessions | `re.*` permissions and role bundles |
+| Audit and e-signature | Platform append-only audit and signature service | Domain meanings for signatures |
+| Read API | `portal.sp_run_semantic_request`, `PortalClient`, Exograph GraphQL + optional MCP (`goliath_portal` role, read-only) | Registry rows only |
+| Writes | REST gateway → `wf.sp_*` / `portal.sp_*` ops and `ActionSpec` actions | Domain actions |
+
+There is no per-app "stored procedures are the API" surface: internal domain procedures exist only as `target_name` of semantic requests or as action handlers.
 
 ## Workflows on the Workflow Engine
 
@@ -180,22 +304,6 @@ Controls:
 | DNC scrub and prospect refresh | Claim | Weekly backlog |
 
 Same pattern as GoliathCrop and GoliathFactory: a stored procedure inserts the task and issues `pg_notify`; idle workers wake, then own it with a gateway claim. All CPU-only.
-
-## Database schema sketch
-
-| Schema | Key tables |
-| --- | --- |
-| `re_org` | offices, teams, agents, licenses, ce_records, memberships |
-| `re_crm` | contacts, households, leads, lead_routes, activities, tasks |
-| `re_lead` | lead_sources, raw_leads, prospects, lead_matches, lead_scores, message_drafts, prospect_lists, dnc_checks |
-| `re_prop` | properties (PostGIS geometry), listings, listing_media, price_history, mls_listings (RESO replica) |
-| `re_deal` | relationships, buyer_agreements, showings, offers, transactions, deadlines, checklist_items |
-| `re_doc` | templates, documents, document_versions, review_decisions |
-| `re_trust` | escrow_accounts, ledger_entries, reconciliations, disputes |
-| `re_comm` | commission_plans, plan_rules, caps, disbursements, agent_charges, statements |
-| `re_portal` | client_access, saved_searches, messages |
-| `re_pm` (later) | rentals, leases, tenant_ledger, maintenance_requests, owner_statements |
-| `re_api` | stored procedures only; the portal's surface |
 
 ## Integrations
 
@@ -328,3 +436,20 @@ All 15 recommended defaults were adopted by David on 2026-11-03.
 - Follow Up Boss, lead sources and inbox processing: https://help.followupboss.com/hc/en-us/articles/4420151624343-Lead-Sources-Websites-with-API-Integrations
 - Florida FTSA 2023 amendment (Goodwin): https://www.goodwinlaw.com/en/insights/publications/2023/06/alerts-otherindustries-dpc-florida-amends-mini-tcpa
 - FCC removes one-to-one consent rule: https://www.fcc.gov/document/fcc-removes-one-one-consent-rule-nullified-court-decision
+
+## Appendix: physical mapping (internal)
+
+These schemas back the semantic entities above. They are not a public API: the portal, Exograph, and agents reach them only through registered semantic requests and `ActionSpec` actions.
+
+| Schema | Key tables |
+| --- | --- |
+| `re_org` | offices, teams, agents, licenses, ce_records, memberships |
+| `re_crm` | contacts, households, leads, lead_routes, activities, tasks |
+| `re_lead` | lead_sources, raw_leads, prospects, lead_matches, lead_scores, message_drafts, prospect_lists, dnc_checks |
+| `re_prop` | properties (PostGIS geometry), listings, listing_media, price_history, mls_listings (RESO replica) |
+| `re_deal` | relationships, buyer_agreements, showings, offers, transactions, deadlines, checklist_items |
+| `re_doc` | templates, documents, document_versions, review_decisions |
+| `re_trust` | escrow_accounts, ledger_entries, reconciliations, disputes |
+| `re_comm` | commission_plans, plan_rules, caps, disbursements, agent_charges, statements |
+| `re_portal` | client_access, saved_searches, messages |
+| `re_pm` (later) | rentals, leases, tenant_ledger, maintenance_requests, owner_statements |

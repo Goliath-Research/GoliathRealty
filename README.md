@@ -35,7 +35,7 @@ flowchart LR
   A[GoliathApp<br/>auth, RBAC.Sessions, Workflow Engine,<br/>approvals, e-signature, audit trail, AI service] -.inherited by.-> P
 ```
 
-GoliathRealty inherits GoliathApp auth (`RBAC.Sessions`), the portal, PostgreSQL stored procedures as the API, the Workflow Engine, and workers that claim tasks through goliath-gateway, with Postgres pub/sub waking workers for event-triggered tasks. Human approval steps, e-signatures, the audit trail, inbound email ingestion and the AI scoring/draft service are generic GoliathApp features; accounting syncs through the shared pluggable adapter.
+GoliathRealty inherits GoliathApp auth (`RBAC.Sessions`), the portal, the semantic registry (named requests + Exograph GraphQL/MCP) as the read API, typed `ActionSpec` actions, the Workflow Engine, and workers that claim tasks through goliath-gateway, with Postgres pub/sub waking workers for event-triggered tasks. Human approval steps, e-signatures, the audit trail, inbound email ingestion and the AI scoring/draft service are generic GoliathApp features; accounting syncs through the shared pluggable adapter.
 
 See the [plan](docs/plan.md) for details.
 
